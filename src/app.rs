@@ -335,6 +335,7 @@ impl Coordinator {
             window::WindowBuilder,
         };
 
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut event_loop = EventLoopBuilder::<UiEvent>::with_user_event().build();
         #[cfg(target_os = "macos")]
         {
@@ -378,6 +379,7 @@ impl Coordinator {
         let mut lowercase = settings.lowercase;
         let mut started_at: Option<Instant> = None;
         let mut pressed = false;
+        #[cfg(target_os = "macos")]
         let mut right_control_was_down = false;
         let mut shortcut_window: Option<tao::window::Window> = None;
         let mut shortcut_recorder = crate::hotkey::ShortcutRecorder::new();
@@ -410,6 +412,7 @@ impl Coordinator {
                         }
                         state = OperationState::Idle;
                     }
+                    #[cfg(target_os = "macos")]
                     let polled_right_control_id = registered
                         .as_ref()
                         .filter(|binding| binding.uses_physical_polling())
