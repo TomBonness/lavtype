@@ -12,7 +12,7 @@ use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
 use objc2::runtime::AnyObject;
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
+use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType};
 use std::fmt;
 use tao::{
     event::{ElementState, WindowEvent},
@@ -638,21 +638,26 @@ fn register_native_right_control() -> Result<NativeEventMonitor, HotkeyError> {
         if event.keyCode() != 62 {
             return;
         }
-        let state = if event
-            .modifierFlags()
-            .contains(NSEventModifierFlags::Control)
-        {
-            HotKeyState::Pressed
-        } else {
-            HotKeyState::Released
+        let state = match event.r#type() {
+            NSEventType::KeyDown => HotKeyState::Pressed,
+            NSEventType::KeyUp => HotKeyState::Released,
+            _ if event
+                .modifierFlags()
+                .contains(NSEventModifierFlags::Control) =>
+            {
+                HotKeyState::Pressed
+            }
+            _ => HotKeyState::Released,
         };
         let _ = sender.send(state);
     });
-    let monitor =
-        NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::FlagsChanged, &block)
-            .ok_or_else(|| {
-            HotkeyError::NativeRegister("NSEvent global monitor could not be installed".into())
-        })?;
+    let monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+        NSEventMask::FlagsChanged | NSEventMask::KeyDown | NSEventMask::KeyUp,
+        &block,
+    )
+    .ok_or_else(|| {
+        HotkeyError::NativeRegister("NSEvent global monitor could not be installed".into())
+    })?;
     Ok((monitor, block))
 }
 
