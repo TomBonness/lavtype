@@ -35,6 +35,20 @@ pub struct Tray {
     pub quit: MenuItem,
 }
 
+fn model_menu_label(
+    state: OperationState,
+    progress: Option<DownloadProgress>,
+    ready: bool,
+) -> String {
+    match (state, progress, ready) {
+        (OperationState::Downloading, Some(progress), _) => {
+            format!("Downloading model… {}%", progress.percent())
+        }
+        (OperationState::Downloading, None, _) => "Downloading model…".to_string(),
+        (_, _, true) => "Parakeet model installed".to_string(),
+        _ => "Download model (460 MiB)".to_string(),
+    }
+}
 impl Tray {
     pub fn new(engine_apple: bool, lowercase: bool, parakeet_ready: bool) -> Result<Self, String> {
         let menu = Menu::new();
@@ -119,6 +133,12 @@ impl Tray {
         Ok(tray)
     }
 
+    pub fn set_engine(&self, apple_selected: bool) {
+        #[cfg(target_os = "macos")]
+        self.apple.set_checked(apple_selected);
+        self.parakeet.set_checked(!apple_selected);
+    }
+
     pub fn update(
         &self,
         state: OperationState,
@@ -127,13 +147,7 @@ impl Tray {
         has_shortcut: bool,
         download_progress: Option<DownloadProgress>,
     ) {
-        let download_label = match download_progress {
-            Some(progress) if state == OperationState::Downloading => {
-                format!("Downloading model… {}%", progress.percent())
-            }
-            _ if state == OperationState::Downloading => "Downloading model…".to_string(),
-            _ => "Download model (460 MiB)".to_string(),
-        };
+        let download_label = model_menu_label(state, download_progress, parakeet_ready);
         let status = match (state, error) {
             (_, Some(error)) if !error.is_empty() => error.to_string(),
             (OperationState::Recording, _) => "Recording…".to_string(),
@@ -149,6 +163,9 @@ impl Tray {
         self.shortcut.set_enabled(idle);
         self.download.set_enabled(idle && !parakeet_ready);
         self.lowercase.set_enabled(idle);
+        self.parakeet.set_enabled(idle);
+        #[cfg(target_os = "macos")]
+        self.apple.set_enabled(idle);
         self.quit.set_enabled(true);
         #[cfg(target_os = "macos")]
         self.permissions.set_enabled(idle);
@@ -201,4 +218,29 @@ fn make_icon(state: TrayVisualState) -> Result<Icon, String> {
         }
     }
     Icon::from_rgba(rgba, 32, 32).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_menu_distinguishes_missing_downloading_and_installed() {
+        assert_eq!(
+            model_menu_label(OperationState::Idle, None, false),
+            "Download model (460 MiB)"
+        );
+        assert_eq!(
+            model_menu_label(
+                OperationState::Downloading,
+                Some(DownloadProgress::new(50, 100)),
+                false,
+            ),
+            "Downloading model… 50%"
+        );
+        assert_eq!(
+            model_menu_label(OperationState::Idle, None, true),
+            "Parakeet model installed"
+        );
+    }
 }

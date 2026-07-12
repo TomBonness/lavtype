@@ -292,8 +292,6 @@ impl Coordinator {
         crate::platform::require_x11_session()
             .map_err(|error| AppError::Message(error.to_owned()))?;
 
-        #[cfg(target_os = "macos")]
-        crate::platform::configure_menu_bar_only();
         use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
         use tao::{
             dpi::LogicalSize,
@@ -302,7 +300,14 @@ impl Coordinator {
             window::WindowBuilder,
         };
 
-        let event_loop = EventLoopBuilder::<UiEvent>::with_user_event().build();
+        let mut event_loop = EventLoopBuilder::<UiEvent>::with_user_event().build();
+        #[cfg(target_os = "macos")]
+        {
+            use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+            event_loop.set_activation_policy(ActivationPolicy::Accessory);
+            event_loop.set_dock_visibility(false);
+            event_loop.set_activate_ignoring_other_apps(false);
+        }
         let proxy = event_loop.create_proxy();
         tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
             let _ = proxy.send_event(UiEvent::Menu(event));
@@ -520,16 +525,40 @@ impl Coordinator {
                     } else if id == crate::tray::ID_ENGINE_APPLE {
                         #[cfg(target_os = "macos")]
                         if state == OperationState::Idle {
+                            let previous = settings.engine;
                             settings.engine = crate::settings::Engine::AppleSpeech;
-                            if let Err(error) = crate::settings::save(&settings) {
-                                last_error = Some(error.to_string());
+                            match crate::settings::save(&settings) {
+                                Ok(()) => {
+                                    tray.set_engine(true);
+                                    last_error = None;
+                                }
+                                Err(error) => {
+                                    settings.engine = previous;
+                                    tray.set_engine(matches!(
+                                        previous,
+                                        crate::settings::Engine::AppleSpeech
+                                    ));
+                                    last_error = Some(error.to_string());
+                                }
                             }
                         }
                     } else if id == crate::tray::ID_ENGINE_PARAKEET {
                         if state == OperationState::Idle {
+                            let previous = settings.engine;
                             settings.engine = crate::settings::Engine::Parakeet;
-                            if let Err(error) = crate::settings::save(&settings) {
-                                last_error = Some(error.to_string());
+                            match crate::settings::save(&settings) {
+                                Ok(()) => {
+                                    tray.set_engine(false);
+                                    last_error = None;
+                                }
+                                Err(error) => {
+                                    settings.engine = previous;
+                                    tray.set_engine(matches!(
+                                        previous,
+                                        crate::settings::Engine::AppleSpeech
+                                    ));
+                                    last_error = Some(error.to_string());
+                                }
                             }
                         }
                     } else if id == crate::tray::ID_PERMISSIONS && state == OperationState::Idle {

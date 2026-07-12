@@ -19,7 +19,7 @@ const ON_DEVICE_UNAVAILABLE: &str = "On-device Apple Speech is unavailable for t
 #[derive(Debug)]
 enum CallbackResult {
     Final(String),
-    Error,
+    Error(String),
 }
 type RecognitionCallback = RcBlock<dyn Fn(*mut SFSpeechRecognitionResult, *mut NSError)>;
 type RequestLifetime = (
@@ -101,13 +101,20 @@ impl AppleSpeechTranscriber {
         let callback: RcBlock<dyn Fn(*mut SFSpeechRecognitionResult, *mut NSError)> =
             RcBlock::<dyn Fn(*mut SFSpeechRecognitionResult, *mut NSError)>::new(
                 move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
-                    if !error.is_null() {
-                        let _ = sender.send(CallbackResult::Error);
+                    if let Some(error) = unsafe { error.as_ref() } {
+                        let description = error.localizedDescription().to_string();
+                        let domain = error.domain().to_string();
+                        let _ = sender.send(CallbackResult::Error(format!(
+                            "{description} ({domain}, code {})",
+                            error.code()
+                        )));
                         return;
                     }
                     // Callback pointers are valid for the duration of the callback.
                     let Some(result) = (unsafe { result.as_ref() }) else {
-                        let _ = sender.send(CallbackResult::Error);
+                        let _ = sender.send(CallbackResult::Error(
+                            "recognition callback returned no result".to_owned(),
+                        ));
                         return;
                     };
                     if !unsafe { result.isFinal() } {
@@ -153,11 +160,9 @@ fn await_result(
 ) -> Result<String, TranscriptionError> {
     match receiver.recv_timeout(timeout) {
         Ok(CallbackResult::Final(text)) => Ok(text),
-        Ok(CallbackResult::Error) => {
+        Ok(CallbackResult::Error(error)) => {
             cancel();
-            Err(TranscriptionError::AppleRecognition(
-                "the on-device recognizer reported an error".to_owned(),
-            ))
+            Err(TranscriptionError::AppleRecognition(error))
         }
         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
             cancel();
@@ -212,7 +217,9 @@ mod tests {
     #[test]
     fn error_and_timeout_cancel_and_release_lifetime() {
         let (sender, receiver) = bounded(1);
-        sender.send(CallbackResult::Error).unwrap();
+        sender
+            .send(CallbackResult::Error("fake recognition failure".into()))
+            .unwrap();
         let canceled = std::sync::atomic::AtomicBool::new(false);
         let result = await_result(receiver, Duration::from_millis(10), || {
             canceled.store(true, std::sync::atomic::Ordering::SeqCst)

@@ -9,12 +9,11 @@ use std::time::Duration;
 
 use block2::RcBlock;
 use objc2::runtime::Bool;
-use objc2_application_services::AXIsProcessTrustedWithOptions;
+use objc2_application_services::{AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt};
 use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
+use objc2_core_foundation::{CFBoolean, CFDictionary, CFString};
 use objc2_speech::{SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus};
 
-use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 /// Exact `NSMicrophoneUsageDescription` value required by the application.
 pub const MICROPHONE_USAGE_DESCRIPTION: &str =
     "Lavtype records while you hold the dictation shortcut.";
@@ -108,20 +107,17 @@ pub fn accessibility_permission() -> bool {
     unsafe { AXIsProcessTrustedWithOptions(None) }
 }
 
-/// Read Accessibility and, where possible, trigger Apple's standard trust
-/// check.  The system settings prompt is asynchronous; callers should keep
-/// the menu alive and call [`accessibility_permission`] again when returning
-/// to the app.
+/// Trigger Apple's standard Accessibility trust prompt when this build is not trusted.
+///
+/// TCC prompts asynchronously, so the return value is the current state. The
+/// coordinator keeps the tray alive while the user grants access.
 pub fn request_accessibility() -> bool {
-    unsafe { AXIsProcessTrustedWithOptions(None) }
-}
-
-/// Keep Lavtype as an accessory app: menu bar icon only, never a Dock app.
-pub fn configure_menu_bar_only() {
-    if let Some(mtm) = MainThreadMarker::new() {
-        let app = NSApplication::sharedApplication(mtm);
-        let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    }
+    let prompt = CFBoolean::new(true);
+    let options = CFDictionary::<CFString, CFBoolean>::from_slices(
+        &[unsafe { kAXTrustedCheckOptionPrompt }],
+        &[prompt],
+    );
+    unsafe { AXIsProcessTrustedWithOptions(Some(options.as_opaque())) }
 }
 
 /// Open the relevant System Settings privacy pane after a denied permission.

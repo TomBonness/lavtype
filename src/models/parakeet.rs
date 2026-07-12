@@ -446,9 +446,29 @@ fn extract_and_install(
     let input = File::open(archive_path)?;
     let decoder = BzDecoder::new(input);
     let mut archive = Archive::new(decoder);
-    archive
-        .unpack(temp.path())
-        .map_err(|error| InstallError::Archive(error.to_string()))?;
+    let expected: HashSet<&str> = manifest.installed_files.iter().copied().collect();
+    for item in archive.entries()? {
+        let mut entry = item.map_err(|error| InstallError::Archive(error.to_string()))?;
+        let path = entry
+            .path()
+            .map_err(|error| InstallError::Archive(error.to_string()))?
+            .into_owned();
+        let relative = path
+            .strip_prefix(MODEL_DIRECTORY_NAME)
+            .map_err(|error| InstallError::Archive(error.to_string()))?;
+        let mut components = relative.components();
+        let Some(Component::Normal(name)) = components.next() else {
+            continue;
+        };
+        if components.next().is_none()
+            && expected.contains(name.to_str().unwrap_or_default())
+            && entry.header().entry_type().is_file()
+        {
+            entry
+                .unpack_in(temp.path())
+                .map_err(|error| InstallError::Archive(error.to_string()))?;
+        }
+    }
     let extracted = temp.path().join(MODEL_DIRECTORY_NAME);
     validate_model_dir(&extracted, manifest)?;
     atomic_replace(&extracted, model_dir, parent)
@@ -661,6 +681,7 @@ mod tests {
             ("decoder.int8.onnx", b"decoder".as_slice()),
             ("joiner.int8.onnx", b"joiner".as_slice()),
             ("tokens.txt", b"tokens".as_slice()),
+            ("test_wavs/sample.wav", b"optional sample".as_slice()),
         ];
         let bytes = archive_bytes(&entries);
         let root = tempfile::tempdir().unwrap();
@@ -672,6 +693,7 @@ mod tests {
                 ("decoder.int8.onnx", b"decoder".as_slice()),
                 ("joiner.int8.onnx", b"joiner".as_slice()),
                 ("tokens.txt", b"tokens".as_slice()),
+                ("test_wavs/sample.wav", b"optional sample".as_slice()),
             ];
             digest(&archive_bytes(&entries))
         });
@@ -680,6 +702,7 @@ mod tests {
         let model = root.path().join(MODEL_DIRECTORY_NAME);
         install_archive_file(&archive, root.path(), &model, &manifest).unwrap();
         assert!(validate_model_dir(&model, &manifest).is_ok());
+        assert!(!model.join("test_wavs").exists());
 
         let short_manifest = test_manifest(bytes.len() as u64 + 1, digest);
         assert!(matches!(

@@ -18,7 +18,7 @@ pub use linux::{
 #[cfg(target_os = "macos")]
 pub use macos::{
     ACCESSIBILITY_PERMISSION_ERROR, APPLE_SPEECH_UNAVAILABLE_ERROR, MICROPHONE_USAGE_DESCRIPTION,
-    Permission, SPEECH_USAGE_DESCRIPTION, accessibility_permission, configure_menu_bar_only,
-    microphone_permission, open_privacy_settings, permission_summary, request_accessibility,
-    request_microphone, request_speech, speech_permission,
+    Permission, SPEECH_USAGE_DESCRIPTION, accessibility_permission, microphone_permission,
+    open_privacy_settings, permission_summary, request_accessibility, request_microphone,
+    request_speech, speech_permission,
 };
