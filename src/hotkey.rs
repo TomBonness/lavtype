@@ -13,6 +13,8 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType};
+#[cfg(target_os = "macos")]
+use objc2_core_graphics::{CGEventSource, CGEventSourceStateID};
 use std::fmt;
 use tao::{
     event::{ElementState, WindowEvent},
@@ -625,6 +627,23 @@ pub fn right_control_receiver() -> &'static Receiver<HotKeyState> {
 }
 
 #[cfg(target_os = "macos")]
+pub fn right_control_is_down() -> bool {
+    CGEventSource::key_state(CGEventSourceStateID::CombinedSessionState, 62)
+}
+
+pub fn key_state_transition(previous: &mut bool, current: bool) -> Option<HotKeyState> {
+    if *previous == current {
+        return None;
+    }
+    *previous = current;
+    Some(if current {
+        HotKeyState::Pressed
+    } else {
+        HotKeyState::Released
+    })
+}
+
+#[cfg(target_os = "macos")]
 type NativeEventMonitor = (
     Retained<AnyObject>,
     RcBlock<dyn Fn(std::ptr::NonNull<NSEvent>)>,
@@ -1024,6 +1043,21 @@ mod tests {
         assert_eq!(
             recorder.handle_key(KeyCode::ControlRight, ElementState::Released),
             RecorderAction::Completed(Shortcut::new(KeyName::ControlRight, Modifiers::default()))
+        );
+    }
+
+    #[test]
+    fn physical_key_polling_emits_only_edges() {
+        let mut previous = false;
+        assert_eq!(key_state_transition(&mut previous, false), None);
+        assert_eq!(
+            key_state_transition(&mut previous, true),
+            Some(HotKeyState::Pressed)
+        );
+        assert_eq!(key_state_transition(&mut previous, true), None);
+        assert_eq!(
+            key_state_transition(&mut previous, false),
+            Some(HotKeyState::Released)
         );
     }
     #[test]

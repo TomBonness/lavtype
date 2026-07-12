@@ -343,6 +343,7 @@ impl Coordinator {
         let mut lowercase = settings.lowercase;
         let mut started_at: Option<Instant> = None;
         let mut pressed = false;
+        let mut right_control_was_down = false;
         let mut shortcut_window: Option<tao::window::Window> = None;
         let mut shortcut_recorder = crate::hotkey::ShortcutRecorder::new();
         let mut download_progress: Option<crate::models::DownloadProgress> = None;
@@ -378,13 +379,28 @@ impl Coordinator {
                         (binding.shortcut().key == crate::hotkey::KeyName::ControlRight)
                             .then_some(binding.id())
                     });
-                    for hotkey in GlobalHotKeyEvent::receiver().try_iter().chain(
-                        crate::hotkey::right_control_receiver()
-                            .try_iter()
-                            .filter_map(move |state| {
-                                native_right_control_id.map(|id| GlobalHotKeyEvent { id, state })
-                            }),
-                    ) {
+                    #[cfg(target_os = "macos")]
+                    let polled_right_control = native_right_control_id.and_then(|id| {
+                        crate::hotkey::key_state_transition(
+                            &mut right_control_was_down,
+                            crate::hotkey::right_control_is_down(),
+                        )
+                        .map(|state| GlobalHotKeyEvent { id, state })
+                    });
+                    #[cfg(not(target_os = "macos"))]
+                    let polled_right_control: Option<GlobalHotKeyEvent> = None;
+                    for hotkey in GlobalHotKeyEvent::receiver()
+                        .try_iter()
+                        .chain(
+                            crate::hotkey::right_control_receiver()
+                                .try_iter()
+                                .filter_map(move |state| {
+                                    native_right_control_id
+                                        .map(|id| GlobalHotKeyEvent { id, state })
+                                }),
+                        )
+                        .chain(polled_right_control)
+                    {
                         let is_expected = registered
                             .as_ref()
                             .is_some_and(|binding| binding.id() == hotkey.id);
