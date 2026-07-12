@@ -154,61 +154,6 @@ pub fn resample_to_16khz(samples: &[f32], source_rate: u32) -> Result<Vec<f32>, 
     Ok(output.take_data())
 }
 
-fn should_prefer_builtin_input(
-    default_name: &str,
-    default_sample_rate: u32,
-    candidate_name: &str,
-    candidate_sample_rate: u32,
-) -> bool {
-    let default_name = default_name.to_ascii_lowercase();
-    let candidate_name = candidate_name.to_ascii_lowercase();
-    default_sample_rate < 32_000
-        && (default_name.contains("airpods") || default_name.contains("bluetooth"))
-        && candidate_sample_rate >= 44_100
-        && candidate_name.contains("microphone")
-        && (candidate_name.contains("macbook") || candidate_name.contains("built-in"))
-}
-
-fn select_input_device(host: &cpal::Host, default: cpal::Device) -> cpal::Device {
-    #[cfg(target_os = "macos")]
-    {
-        let Ok(default_config) = default.default_input_config() else {
-            return default;
-        };
-        let default_name = default.to_string();
-        let default_rate = default_config.sample_rate();
-        let default_name_lower = default_name.to_ascii_lowercase();
-        if default_rate >= 32_000
-            || (!default_name_lower.contains("airpods")
-                && !default_name_lower.contains("bluetooth"))
-        {
-            return default;
-        }
-        if let Ok(devices) = host.input_devices() {
-            for candidate in devices {
-                let name = candidate.to_string();
-                let Ok(config) = candidate.default_input_config() else {
-                    continue;
-                };
-                if should_prefer_builtin_input(
-                    &default_name,
-                    default_rate,
-                    &name,
-                    config.sample_rate(),
-                ) {
-                    return candidate;
-                }
-            }
-        }
-        default
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = host;
-        default
-    }
-}
-
 /// Default cpal input recorder.
 pub struct CpalAudioRecorder {
     stream: Option<cpal::Stream>,
@@ -278,10 +223,9 @@ impl crate::app::AudioRecorder for CpalAudioRecorder {
         }
 
         let host = cpal::default_host();
-        let default = host
+        let device = host
             .default_input_device()
             .ok_or(CaptureError::NoInputDevice)?;
-        let device = select_input_device(&host, default);
         let supported = device
             .default_input_config()
             .map_err(|error: cpal::Error| CaptureError::DefaultConfig(error.to_string()))?;
@@ -475,33 +419,5 @@ mod tests {
             resample_to_16khz(&[1.0], 0),
             Err(CaptureError::InvalidSampleRate)
         );
-    }
-
-    #[test]
-    fn low_bandwidth_default_prefers_builtin_microphone() {
-        assert!(should_prefer_builtin_input(
-            "Tom's AirPods",
-            24_000,
-            "MacBook Air Microphone",
-            48_000
-        ));
-        assert!(!should_prefer_builtin_input(
-            "USB Conference Microphone",
-            24_000,
-            "MacBook Air Microphone",
-            48_000
-        ));
-        assert!(!should_prefer_builtin_input(
-            "Tom's AirPods",
-            48_000,
-            "MacBook Air Microphone",
-            48_000
-        ));
-        assert!(!should_prefer_builtin_input(
-            "Tom's AirPods",
-            24_000,
-            "USB Studio Microphone",
-            48_000
-        ));
     }
 }

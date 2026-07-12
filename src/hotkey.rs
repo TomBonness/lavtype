@@ -1,18 +1,9 @@
-use crossbeam_channel::{Receiver, Sender, unbounded};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
     hotkey::{Code, HotKey, Modifiers as GlobalModifiers},
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[cfg(target_os = "macos")]
-use block2::RcBlock;
-#[cfg(target_os = "macos")]
-use objc2::rc::Retained;
-#[cfg(target_os = "macos")]
-use objc2::runtime::AnyObject;
-#[cfg(target_os = "macos")]
-use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType};
 #[cfg(target_os = "macos")]
 use objc2_core_graphics::{CGEventSource, CGEventSourceStateID};
 use std::fmt;
@@ -613,17 +604,6 @@ pub enum HotkeyError {
     Register(#[source] global_hotkey::Error),
     #[error("could not unregister shortcut: {0}")]
     Unregister(#[source] global_hotkey::Error),
-    #[error("could not register standalone right Control shortcut: {0}")]
-    NativeRegister(String),
-    #[error("could not unregister standalone right Control shortcut: {0}")]
-    NativeUnregister(String),
-}
-
-static RIGHT_CONTROL_EVENTS: std::sync::LazyLock<(Sender<HotKeyState>, Receiver<HotKeyState>)> =
-    std::sync::LazyLock::new(unbounded);
-
-pub fn right_control_receiver() -> &'static Receiver<HotKeyState> {
-    &RIGHT_CONTROL_EVENTS.1
 }
 
 #[cfg(target_os = "macos")]
@@ -643,56 +623,9 @@ pub fn key_state_transition(previous: &mut bool, current: bool) -> Option<HotKey
     })
 }
 
-#[cfg(target_os = "macos")]
-type NativeEventMonitor = (
-    Retained<AnyObject>,
-    RcBlock<dyn Fn(std::ptr::NonNull<NSEvent>)>,
-);
-
-#[cfg(target_os = "macos")]
-fn register_native_right_control() -> Result<NativeEventMonitor, HotkeyError> {
-    let sender = RIGHT_CONTROL_EVENTS.0.clone();
-    let block = RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
-        let event = unsafe { event.as_ref() };
-        if event.keyCode() != 62 {
-            return;
-        }
-        let state = match event.r#type() {
-            NSEventType::KeyDown => HotKeyState::Pressed,
-            NSEventType::KeyUp => HotKeyState::Released,
-            _ if event
-                .modifierFlags()
-                .contains(NSEventModifierFlags::Control) =>
-            {
-                HotKeyState::Pressed
-            }
-            _ => HotKeyState::Released,
-        };
-        let _ = sender.send(state);
-    });
-    let monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-        NSEventMask::FlagsChanged | NSEventMask::KeyDown | NSEventMask::KeyUp,
-        &block,
-    )
-    .ok_or_else(|| {
-        HotkeyError::NativeRegister("NSEvent global monitor could not be installed".into())
-    })?;
-    Ok((monitor, block))
-}
-
-#[cfg(target_os = "macos")]
-fn unregister_native_right_control(monitor: &NativeEventMonitor) -> Result<(), HotkeyError> {
-    unsafe {
-        NSEvent::removeMonitor(&monitor.0);
-    }
-    Ok(())
-}
-
 pub struct RegisteredShortcut {
     shortcut: Shortcut,
     hotkey: HotKey,
-    #[cfg(target_os = "macos")]
-    native_monitor: Option<NativeEventMonitor>,
 }
 pub trait HotkeyRegistrar {
     fn register_hotkey(&mut self, hotkey: HotKey) -> Result<(), global_hotkey::Error>;
@@ -713,12 +646,9 @@ impl RegisteredShortcut {
     ) -> Result<Self, HotkeyError> {
         #[cfg(target_os = "macos")]
         if shortcut.key == KeyName::ControlRight {
-            let hotkey = shortcut.hotkey();
-            let native_monitor = register_native_right_control()?;
             return Ok(Self {
                 shortcut,
-                hotkey,
-                native_monitor: Some(native_monitor),
+                hotkey: shortcut.hotkey(),
             });
         }
 
@@ -733,12 +663,7 @@ impl RegisteredShortcut {
         registrar
             .register_hotkey(hotkey)
             .map_err(HotkeyError::Register)?;
-        Ok(Self {
-            shortcut,
-            hotkey,
-            #[cfg(target_os = "macos")]
-            native_monitor: None,
-        })
+        Ok(Self { shortcut, hotkey })
     }
 
     pub fn new(manager: &GlobalHotKeyManager, shortcut: Shortcut) -> Result<Self, HotkeyError> {
@@ -763,35 +688,21 @@ impl RegisteredShortcut {
         manager: &GlobalHotKeyManager,
         replacement: Shortcut,
     ) -> Result<(), HotkeyError> {
+        let old_is_polled = self.shortcut.key == KeyName::ControlRight;
+        let next_is_polled = replacement.key == KeyName::ControlRight;
         let next = replacement.hotkey();
-        let next_native = if replacement.key == KeyName::ControlRight {
-            Some(register_native_right_control()?)
-        } else {
-            manager.register(next).map_err(HotkeyError::Register)?;
-            None
-        };
 
-        let old_native = self.native_monitor.take();
-        let unregister_result = if let Some(native) = &old_native {
-            unregister_native_right_control(native)
-        } else {
-            manager
+        match (old_is_polled, next_is_polled) {
+            (true, true) => {}
+            (true, false) => manager.register(next).map_err(HotkeyError::Register)?,
+            (false, true) => manager
                 .unregister(self.hotkey)
-                .map_err(HotkeyError::Unregister)
-        };
-        if let Err(error) = unregister_result {
-            if let Some(native) = &next_native {
-                let _ = unregister_native_right_control(native);
-            } else {
-                let _ = manager.unregister(next);
-            }
-            self.native_monitor = old_native;
-            return Err(error);
+                .map_err(HotkeyError::Unregister)?,
+            (false, false) => unreachable!("native replacement requires Right Control"),
         }
 
         self.shortcut = replacement;
         self.hotkey = next;
-        self.native_monitor = next_native;
         Ok(())
     }
 
@@ -810,10 +721,6 @@ impl RegisteredShortcut {
         }
         self.shortcut = replacement;
         self.hotkey = next;
-        #[cfg(target_os = "macos")]
-        {
-            self.native_monitor = None;
-        }
         Ok(())
     }
 
@@ -824,20 +731,18 @@ impl RegisteredShortcut {
     pub fn id(&self) -> u32 {
         self.hotkey.id()
     }
+    /// Standalone Right Control is derived exclusively from the physical key
+    /// state on macOS. Mixing event-monitor and polling transitions can pair a
+    /// press from one source with a stale release from the other.
+    pub fn uses_physical_polling(&self) -> bool {
+        cfg!(target_os = "macos") && self.shortcut.key == KeyName::ControlRight
+    }
 
     pub fn hotkey(&self) -> HotKey {
         self.hotkey
     }
 }
 
-impl Drop for RegisteredShortcut {
-    fn drop(&mut self) {
-        #[cfg(target_os = "macos")]
-        if let Some(native_monitor) = self.native_monitor.take() {
-            let _ = unregister_native_right_control(&native_monitor);
-        }
-    }
-}
 struct ManagerRef<'a>(&'a GlobalHotKeyManager);
 impl HotkeyRegistrar for ManagerRef<'_> {
     fn register_hotkey(&mut self, hotkey: HotKey) -> Result<(), global_hotkey::Error> {
@@ -1060,6 +965,24 @@ mod tests {
             Some(HotKeyState::Released)
         );
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn standalone_right_control_has_only_the_physical_polling_backend() {
+        let shortcut = Shortcut::new(KeyName::ControlRight, Modifiers::default());
+        let binding = RegisteredShortcut {
+            shortcut,
+            hotkey: shortcut.hotkey(),
+        };
+        assert!(binding.uses_physical_polling());
+
+        let shortcut = Shortcut::new(KeyName::Space, Modifiers::ALT);
+        let binding = RegisteredShortcut {
+            shortcut,
+            hotkey: shortcut.hotkey(),
+        };
+        assert!(!binding.uses_physical_polling());
+    }
+
     #[test]
     fn replacement_registers_before_removing_old_and_preserves_on_collision() {
         struct Fake {

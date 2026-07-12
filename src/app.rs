@@ -47,6 +47,23 @@ fn has_minimum_audio(clip: &AudioClip) -> bool {
             >= (clip.sample_rate as u128 * MIN_RECORDING.as_millis())
 }
 
+fn validate_transcription(text: String, clip: &AudioClip) -> Result<String, TranscriptionError> {
+    if !text.trim().is_empty() {
+        return Ok(text);
+    }
+    let duration = clip.samples.len() as f64 / f64::from(clip.sample_rate.max(1));
+    let peak = clip
+        .samples
+        .iter()
+        .copied()
+        .map(f32::abs)
+        .fold(0.0, f32::max);
+    Err(TranscriptionError::Recognition(format!(
+        "No speech was recognized from a {duration:.1}s recording at {} Hz (peak {peak:.4})",
+        clip.sample_rate
+    )))
+}
+
 /// The synchronous, testable part of the application coordinator.  The tao
 /// event loop below is deliberately a thin adapter around this authority.
 pub struct CoordinatorCore<A, S, I> {
@@ -287,14 +304,17 @@ fn run_worker(
             }
         };
         if samples.len() < 1_600 {
-            let _ = sender.send(WorkerEvent::Transcribed(Ok(String::new())));
+            let _ = sender.send(WorkerEvent::Transcribed(Err(
+                TranscriptionError::Recognition(NO_AUDIO_ERROR.into()),
+            )));
             continue;
         }
         let result = cached
             .as_mut()
             .expect("worker cache initialized")
             .1
-            .transcribe(&samples, 16_000);
+            .transcribe(&samples, 16_000)
+            .and_then(|text| validate_transcription(text, &clip));
         let _ = sender.send(WorkerEvent::Transcribed(result));
     }
 }
@@ -390,12 +410,12 @@ impl Coordinator {
                         }
                         state = OperationState::Idle;
                     }
-                    let native_right_control_id = registered.as_ref().and_then(|binding| {
-                        (binding.shortcut().key == crate::hotkey::KeyName::ControlRight)
-                            .then_some(binding.id())
-                    });
+                    let polled_right_control_id = registered
+                        .as_ref()
+                        .filter(|binding| binding.uses_physical_polling())
+                        .map(crate::hotkey::RegisteredShortcut::id);
                     #[cfg(target_os = "macos")]
-                    let polled_right_control = native_right_control_id.and_then(|id| {
+                    let polled_right_control = polled_right_control_id.and_then(|id| {
                         crate::hotkey::key_state_transition(
                             &mut right_control_was_down,
                             crate::hotkey::right_control_is_down(),
@@ -406,14 +426,11 @@ impl Coordinator {
                     let polled_right_control: Option<GlobalHotKeyEvent> = None;
                     for hotkey in GlobalHotKeyEvent::receiver()
                         .try_iter()
-                        .chain(
-                            crate::hotkey::right_control_receiver()
-                                .try_iter()
-                                .filter_map(move |state| {
-                                    native_right_control_id
-                                        .map(|id| GlobalHotKeyEvent { id, state })
-                                }),
-                        )
+                        .filter(|_| {
+                            registered
+                                .as_ref()
+                                .is_none_or(|binding| !binding.uses_physical_polling())
+                        })
                         .chain(polled_right_control)
                     {
                         let is_expected = registered
@@ -889,5 +906,18 @@ mod tests {
         )));
         assert!(has_minimum_audio(&AudioClip::new(48_000, vec![0.0; 4_800])));
         assert!(has_minimum_audio(&AudioClip::new(24_000, vec![0.0; 2_400])));
+    }
+    #[test]
+    fn empty_recognition_reports_capture_metrics() {
+        let clip = AudioClip::new(24_000, vec![0.002; 48_000]);
+        let error = validate_transcription(" \n".into(), &clip).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Parakeet recognition failed: No speech was recognized from a 2.0s recording at 24000 Hz (peak 0.0020)"
+        );
+        assert_eq!(
+            validate_transcription("hello".into(), &clip).unwrap(),
+            "hello"
+        );
     }
 }
