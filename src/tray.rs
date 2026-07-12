@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
     menu::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
@@ -20,6 +22,19 @@ pub enum TrayVisualState {
     Busy,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraySnapshot {
+    state: OperationState,
+    error: Option<String>,
+    parakeet_ready: bool,
+    has_shortcut: bool,
+    download_progress: Option<DownloadProgress>,
+}
+
+fn should_publish(last: Option<&TraySnapshot>, next: &TraySnapshot) -> bool {
+    last != Some(next)
+}
+
 pub struct Tray {
     pub icon: TrayIcon,
     pub menu: Menu,
@@ -33,6 +48,7 @@ pub struct Tray {
     pub permissions: MenuItem,
     pub download: MenuItem,
     pub quit: MenuItem,
+    last_published: RefCell<Option<TraySnapshot>>,
 }
 
 fn model_menu_label(
@@ -128,6 +144,7 @@ impl Tray {
             permissions,
             download,
             quit,
+            last_published: RefCell::new(None),
         };
         tray.update(OperationState::Idle, None, parakeet_ready, false, None);
         Ok(tray)
@@ -147,6 +164,16 @@ impl Tray {
         has_shortcut: bool,
         download_progress: Option<DownloadProgress>,
     ) {
+        let snapshot = TraySnapshot {
+            state,
+            error: error.map(str::to_owned),
+            parakeet_ready,
+            has_shortcut,
+            download_progress,
+        };
+        if !should_publish(self.last_published.borrow().as_ref(), &snapshot) {
+            return;
+        }
         let download_label = model_menu_label(state, download_progress, parakeet_ready);
         let status = match (state, error) {
             (_, Some(error)) if !error.is_empty() => error.to_string(),
@@ -181,6 +208,7 @@ impl Tray {
                 .icon
                 .set_icon_with_as_template(Some(icon), cfg!(target_os = "macos"));
         }
+        *self.last_published.borrow_mut() = Some(snapshot);
     }
 }
 
@@ -242,5 +270,24 @@ mod tests {
             model_menu_label(OperationState::Idle, None, true),
             "Parakeet model installed"
         );
+    }
+
+    #[test]
+    fn identical_tray_snapshot_is_not_republished() {
+        let snapshot = TraySnapshot {
+            state: OperationState::Idle,
+            error: None,
+            parakeet_ready: true,
+            has_shortcut: true,
+            download_progress: None,
+        };
+        let published = Some(snapshot.clone());
+        assert!(!should_publish(published.as_ref(), &snapshot));
+
+        let changed = TraySnapshot {
+            state: OperationState::Recording,
+            ..snapshot
+        };
+        assert!(should_publish(published.as_ref(), &changed));
     }
 }
