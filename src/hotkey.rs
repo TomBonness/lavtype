@@ -1,8 +1,18 @@
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
     hotkey::{Code, HotKey, Modifiers as GlobalModifiers},
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+#[cfg(target_os = "macos")]
+use block2::RcBlock;
+#[cfg(target_os = "macos")]
+use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
+use objc2::runtime::AnyObject;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
 use std::fmt;
 use tao::{
     event::{ElementState, WindowEvent},
@@ -607,62 +617,49 @@ pub enum HotkeyError {
     NativeUnregister(String),
 }
 
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct NativeEventHotKeyId {
-    signature: u32,
-    id: u32,
+static RIGHT_CONTROL_EVENTS: std::sync::LazyLock<(Sender<HotKeyState>, Receiver<HotKeyState>)> =
+    std::sync::LazyLock::new(unbounded);
+
+pub fn right_control_receiver() -> &'static Receiver<HotKeyState> {
+    &RIGHT_CONTROL_EVENTS.1
 }
 
 #[cfg(target_os = "macos")]
-type NativeEventHotKeyRef = *mut std::ffi::c_void;
+type NativeEventMonitor = (
+    Retained<AnyObject>,
+    RcBlock<dyn Fn(std::ptr::NonNull<NSEvent>)>,
+);
 
 #[cfg(target_os = "macos")]
-#[link(name = "Carbon", kind = "framework")]
-unsafe extern "C" {
-    fn GetApplicationEventTarget() -> *mut std::ffi::c_void;
-    fn RegisterEventHotKey(
-        key_code: u32,
-        modifiers: u32,
-        hot_key_id: NativeEventHotKeyId,
-        target: *mut std::ffi::c_void,
-        options: u32,
-        hot_key_ref: *mut NativeEventHotKeyRef,
-    ) -> i32;
-    fn UnregisterEventHotKey(hot_key_ref: NativeEventHotKeyRef) -> i32;
+fn register_native_right_control() -> Result<NativeEventMonitor, HotkeyError> {
+    let sender = RIGHT_CONTROL_EVENTS.0.clone();
+    let block = RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
+        let event = unsafe { event.as_ref() };
+        if event.keyCode() != 62 {
+            return;
+        }
+        let state = if event
+            .modifierFlags()
+            .contains(NSEventModifierFlags::Control)
+        {
+            HotKeyState::Pressed
+        } else {
+            HotKeyState::Released
+        };
+        let _ = sender.send(state);
+    });
+    let monitor =
+        NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::FlagsChanged, &block)
+            .ok_or_else(|| {
+            HotkeyError::NativeRegister("NSEvent global monitor could not be installed".into())
+        })?;
+    Ok((monitor, block))
 }
 
 #[cfg(target_os = "macos")]
-fn register_native_right_control(id: u32) -> Result<NativeEventHotKeyRef, HotkeyError> {
-    let mut hot_key_ref = std::ptr::null_mut();
-    let result = unsafe {
-        RegisterEventHotKey(
-            0x3e,
-            0,
-            NativeEventHotKeyId {
-                signature: u32::from_be_bytes(*b"htrs"),
-                id,
-            },
-            GetApplicationEventTarget(),
-            0,
-            &mut hot_key_ref,
-        )
-    };
-    if result != 0 || hot_key_ref.is_null() {
-        return Err(HotkeyError::NativeRegister(format!(
-            "Carbon RegisterEventHotKey returned {result}"
-        )));
-    }
-    Ok(hot_key_ref)
-}
-
-#[cfg(target_os = "macos")]
-fn unregister_native_right_control(hot_key_ref: NativeEventHotKeyRef) -> Result<(), HotkeyError> {
-    let result = unsafe { UnregisterEventHotKey(hot_key_ref) };
-    if result != 0 {
-        return Err(HotkeyError::NativeUnregister(format!(
-            "Carbon UnregisterEventHotKey returned {result}"
-        )));
+fn unregister_native_right_control(monitor: &NativeEventMonitor) -> Result<(), HotkeyError> {
+    unsafe {
+        NSEvent::removeMonitor(&monitor.0);
     }
     Ok(())
 }
@@ -671,7 +668,7 @@ pub struct RegisteredShortcut {
     shortcut: Shortcut,
     hotkey: HotKey,
     #[cfg(target_os = "macos")]
-    native_ref: Option<NativeEventHotKeyRef>,
+    native_monitor: Option<NativeEventMonitor>,
 }
 pub trait HotkeyRegistrar {
     fn register_hotkey(&mut self, hotkey: HotKey) -> Result<(), global_hotkey::Error>;
@@ -693,11 +690,11 @@ impl RegisteredShortcut {
         #[cfg(target_os = "macos")]
         if shortcut.key == KeyName::ControlRight {
             let hotkey = shortcut.hotkey();
-            let native_ref = register_native_right_control(hotkey.id())?;
+            let native_monitor = register_native_right_control()?;
             return Ok(Self {
                 shortcut,
                 hotkey,
-                native_ref: Some(native_ref),
+                native_monitor: Some(native_monitor),
             });
         }
 
@@ -716,7 +713,7 @@ impl RegisteredShortcut {
             shortcut,
             hotkey,
             #[cfg(target_os = "macos")]
-            native_ref: None,
+            native_monitor: None,
         })
     }
 
@@ -744,34 +741,33 @@ impl RegisteredShortcut {
     ) -> Result<(), HotkeyError> {
         let next = replacement.hotkey();
         let next_native = if replacement.key == KeyName::ControlRight {
-            Some(register_native_right_control(next.id())?)
+            Some(register_native_right_control()?)
         } else {
             manager.register(next).map_err(HotkeyError::Register)?;
             None
         };
 
-        let unregister_result = if self.shortcut.key == KeyName::ControlRight {
-            unregister_native_right_control(
-                self.native_ref
-                    .expect("standalone right Control shortcut has native registration"),
-            )
+        let old_native = self.native_monitor.take();
+        let unregister_result = if let Some(native) = &old_native {
+            unregister_native_right_control(native)
         } else {
             manager
                 .unregister(self.hotkey)
                 .map_err(HotkeyError::Unregister)
         };
         if let Err(error) = unregister_result {
-            if let Some(native_ref) = next_native {
-                let _ = unregister_native_right_control(native_ref);
+            if let Some(native) = &next_native {
+                let _ = unregister_native_right_control(native);
             } else {
                 let _ = manager.unregister(next);
             }
+            self.native_monitor = old_native;
             return Err(error);
         }
 
         self.shortcut = replacement;
         self.hotkey = next;
-        self.native_ref = next_native;
+        self.native_monitor = next_native;
         Ok(())
     }
 
@@ -792,7 +788,7 @@ impl RegisteredShortcut {
         self.hotkey = next;
         #[cfg(target_os = "macos")]
         {
-            self.native_ref = None;
+            self.native_monitor = None;
         }
         Ok(())
     }
@@ -813,8 +809,8 @@ impl RegisteredShortcut {
 impl Drop for RegisteredShortcut {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
-        if let Some(native_ref) = self.native_ref.take() {
-            let _ = unregister_native_right_control(native_ref);
+        if let Some(native_monitor) = self.native_monitor.take() {
+            let _ = unregister_native_right_control(&native_monitor);
         }
     }
 }

@@ -367,7 +367,17 @@ impl Coordinator {
                         }
                         state = OperationState::Idle;
                     }
-                    for hotkey in GlobalHotKeyEvent::receiver().try_iter() {
+                    let native_right_control_id = registered.as_ref().and_then(|binding| {
+                        (binding.shortcut().key == crate::hotkey::KeyName::ControlRight)
+                            .then_some(binding.id())
+                    });
+                    for hotkey in GlobalHotKeyEvent::receiver().try_iter().chain(
+                        crate::hotkey::right_control_receiver()
+                            .try_iter()
+                            .filter_map(move |state| {
+                                native_right_control_id.map(|id| GlobalHotKeyEvent { id, state })
+                            }),
+                    ) {
                         let is_expected = registered
                             .as_ref()
                             .is_some_and(|binding| binding.id() == hotkey.id);
