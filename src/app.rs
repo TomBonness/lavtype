@@ -38,6 +38,14 @@ pub enum AppError {
 }
 
 pub const MAX_RECORDING: Duration = Duration::from_secs(55);
+const MIN_RECORDING: Duration = Duration::from_millis(100);
+const NO_AUDIO_ERROR: &str = "No usable microphone audio was captured; hold the shortcut while speaking and check the macOS input device.";
+
+fn has_minimum_audio(clip: &AudioClip) -> bool {
+    clip.sample_rate > 0
+        && (clip.samples.len() as u128 * 1_000)
+            >= (clip.sample_rate as u128 * MIN_RECORDING.as_millis())
+}
 
 /// The synchronous, testable part of the application coordinator.  The tao
 /// event loop below is deliberately a thin adapter around this authority.
@@ -112,6 +120,11 @@ where
     }
 
     fn finish_recording(&mut self) {
+        let held_for = self
+            .started_at
+            .take()
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
         let clip = match self.recorder.stop() {
             Ok(clip) => clip,
             Err(error) => {
@@ -119,7 +132,6 @@ where
                 return;
             }
         };
-        self.started_at = None;
         self.state = OperationState::Transcribing;
         let samples = if clip.sample_rate == 16_000 {
             clip.samples.clone()
@@ -134,6 +146,9 @@ where
         };
         if samples.len() < 1_600 {
             self.state = OperationState::Idle;
+            if held_for >= Duration::from_millis(500) {
+                self.last_error = Some(NO_AUDIO_ERROR.into());
+            }
             return;
         }
         let result = self.transcriber.transcribe(&samples, 16_000);
@@ -430,10 +445,16 @@ impl Coordinator {
                                 if is_expected && pressed && state == OperationState::Recording =>
                             {
                                 pressed = false;
-                                started_at = None;
+                                let held_for = started_at
+                                    .take()
+                                    .map(|started| started.elapsed())
+                                    .unwrap_or_default();
                                 match AudioRecorder::stop(&mut recorder) {
-                                    Ok(clip) if clip.samples.len() < 1_600 => {
-                                        state = OperationState::Idle
+                                    Ok(clip) if !has_minimum_audio(&clip) => {
+                                        state = OperationState::Idle;
+                                        if held_for >= Duration::from_millis(500) {
+                                            last_error = Some(NO_AUDIO_ERROR.into());
+                                        }
                                     }
                                     Ok(clip) => {
                                         state = OperationState::Transcribing;
@@ -460,7 +481,10 @@ impl Coordinator {
                         pressed = false;
                         started_at = None;
                         match AudioRecorder::stop(&mut recorder) {
-                            Ok(clip) if clip.samples.len() < 1_600 => state = OperationState::Idle,
+                            Ok(clip) if !has_minimum_audio(&clip) => {
+                                state = OperationState::Idle;
+                                last_error = Some(NO_AUDIO_ERROR.into());
+                            }
                             Ok(clip) => {
                                 state = OperationState::Transcribing;
                                 if worker_tx
@@ -843,5 +867,27 @@ mod tests {
             Some("Hello, LAVTYPE!")
         );
         assert_eq!(apply_output_policy("  \n", true), None);
+    }
+
+    #[test]
+    fn long_hold_with_no_audio_reports_input_failure() {
+        let mut c = core("unused");
+        c.recorder.clip.samples.clear();
+        c.pressed(Instant::now() - Duration::from_secs(1));
+        c.released();
+        assert_eq!(c.state, OperationState::Idle);
+        assert_eq!(c.last_error.as_deref(), Some(NO_AUDIO_ERROR));
+        assert_eq!(c.transcriber.calls, 0);
+        assert_eq!(c.injector.calls, 0);
+    }
+
+    #[test]
+    fn minimum_audio_duration_uses_source_sample_rate() {
+        assert!(!has_minimum_audio(&AudioClip::new(
+            48_000,
+            vec![0.0; 4_799]
+        )));
+        assert!(has_minimum_audio(&AudioClip::new(48_000, vec![0.0; 4_800])));
+        assert!(has_minimum_audio(&AudioClip::new(24_000, vec![0.0; 2_400])));
     }
 }
