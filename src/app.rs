@@ -338,6 +338,7 @@ impl Coordinator {
         let mut pressed = false;
         let mut shortcut_window: Option<tao::window::Window> = None;
         let mut shortcut_recorder = crate::hotkey::ShortcutRecorder::new();
+        let mut download_progress: Option<crate::models::DownloadProgress> = None;
         let download_proxy = event_loop.create_proxy();
         event_loop.run(move |event, target, control_flow| {
             *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(30));
@@ -443,7 +444,19 @@ impl Coordinator {
                             }
                         }
                     }
-                    tray.update(state, last_error.as_deref(), parakeet_ready, has_shortcut);
+                    tray.update(
+                        state,
+                        last_error.as_deref(),
+                        parakeet_ready,
+                        has_shortcut,
+                        download_progress,
+                    );
+                }
+                Event::UserEvent(UiEvent::DownloadProgress { downloaded, total }) => {
+                    if state == OperationState::Downloading {
+                        download_progress =
+                            Some(crate::models::DownloadProgress::new(downloaded, total));
+                    }
                 }
                 Event::UserEvent(UiEvent::DownloadFinished {
                     installer: completed,
@@ -451,6 +464,7 @@ impl Coordinator {
                 }) => {
                     installer = Some(completed);
                     state = OperationState::Idle;
+                    download_progress = None;
                     match result {
                         Ok(()) => {
                             parakeet_ready = true;
@@ -467,7 +481,9 @@ impl Coordinator {
                     if id == crate::tray::ID_SHORTCUT {
                         if state == OperationState::Idle {
                             match WindowBuilder::new()
-                                .with_title("Press a shortcut (Esc to cancel)")
+                                .with_title(
+                                    "Hold a shortcut: Control/Option/Shift/Command + key, or Right Control (Esc cancels)",
+                                )
                                 .with_inner_size(LogicalSize::new(360.0, 100.0))
                                 .with_resizable(false)
                                 .with_always_on_top(true)
@@ -543,11 +559,26 @@ impl Coordinator {
                         }
                     } else if id == crate::tray::ID_DOWNLOAD && state == OperationState::Idle {
                         state = OperationState::Downloading;
+                        download_progress = Some(crate::models::DownloadProgress::new(
+                            0,
+                            crate::models::PARAKEET_MANIFEST.length,
+                        ));
                         if let Some(mut installer_value) = installer.take() {
                             let proxy = download_proxy.clone();
+                            let progress_proxy = proxy.clone();
                             std::thread::spawn(move || {
+                                let mut last_report = Instant::now() - Duration::from_secs(1);
                                 let result = installer_value
-                                    .download()
+                                    .download_with_progress(|downloaded, total| {
+                                        if downloaded == total
+                                            || last_report.elapsed() >= Duration::from_millis(100)
+                                        {
+                                            let _ = progress_proxy.send_event(
+                                                UiEvent::DownloadProgress { downloaded, total },
+                                            );
+                                            last_report = Instant::now();
+                                        }
+                                    })
                                     .map_err(|error| error.to_string());
                                 let _ = proxy.send_event(UiEvent::DownloadFinished {
                                     installer: installer_value,
@@ -556,6 +587,7 @@ impl Coordinator {
                             });
                         } else {
                             state = OperationState::Idle;
+                            download_progress = None;
                             last_error = Some("Lavtype data directory is unavailable".into());
                         }
                     } else if id == crate::tray::ID_QUIT {
@@ -622,6 +654,10 @@ enum UiEvent {
     DownloadFinished {
         installer: crate::models::ParakeetInstaller,
         result: Result<(), String>,
+    },
+    DownloadProgress {
+        downloaded: u64,
+        total: u64,
     },
 }
 

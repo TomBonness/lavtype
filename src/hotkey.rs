@@ -11,6 +11,7 @@ use tao::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyName {
+    ControlRight,
     Space,
     Enter,
     Tab,
@@ -91,6 +92,7 @@ impl KeyName {
     pub fn to_code(self) -> Code {
         use Code::*;
         match self {
+            Self::ControlRight => ControlRight,
             Self::Space => Space,
             Self::Enter => Enter,
             Self::Tab => Tab,
@@ -171,6 +173,7 @@ impl KeyName {
     pub fn from_tao(code: KeyCode) -> Option<Self> {
         use KeyCode::*;
         Some(match code {
+            ControlRight => Self::ControlRight,
             Space => Self::Space,
             Enter => Self::Enter,
             Tab => Self::Tab,
@@ -253,6 +256,7 @@ impl KeyName {
 impl fmt::Display for KeyName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
+            Self::ControlRight => "RightControl",
             Self::Space => "Space",
             Self::Enter => "Enter",
             Self::Tab => "Tab",
@@ -337,6 +341,7 @@ impl std::str::FromStr for KeyName {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let v = value.to_ascii_lowercase();
         let key = match v.as_str() {
+            "controlright" | "rightcontrol" | "right-ctrl" => Self::ControlRight,
             "space" => Self::Space,
             "enter" | "return" => Self::Enter,
             "tab" => Self::Tab,
@@ -590,17 +595,83 @@ impl Shortcut {
         self.hotkey()
     }
 }
-
 #[derive(Debug, thiserror::Error)]
 pub enum HotkeyError {
     #[error("could not register shortcut: {0}")]
     Register(#[source] global_hotkey::Error),
     #[error("could not unregister shortcut: {0}")]
     Unregister(#[source] global_hotkey::Error),
+    #[error("could not register standalone right Control shortcut: {0}")]
+    NativeRegister(String),
+    #[error("could not unregister standalone right Control shortcut: {0}")]
+    NativeUnregister(String),
 }
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct NativeEventHotKeyId {
+    signature: u32,
+    id: u32,
+}
+
+#[cfg(target_os = "macos")]
+type NativeEventHotKeyRef = *mut std::ffi::c_void;
+
+#[cfg(target_os = "macos")]
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn GetApplicationEventTarget() -> *mut std::ffi::c_void;
+    fn RegisterEventHotKey(
+        key_code: u32,
+        modifiers: u32,
+        hot_key_id: NativeEventHotKeyId,
+        target: *mut std::ffi::c_void,
+        options: u32,
+        hot_key_ref: *mut NativeEventHotKeyRef,
+    ) -> i32;
+    fn UnregisterEventHotKey(hot_key_ref: NativeEventHotKeyRef) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn register_native_right_control(id: u32) -> Result<NativeEventHotKeyRef, HotkeyError> {
+    let mut hot_key_ref = std::ptr::null_mut();
+    let result = unsafe {
+        RegisterEventHotKey(
+            0x3e,
+            0,
+            NativeEventHotKeyId {
+                signature: u32::from_be_bytes(*b"htrs"),
+                id,
+            },
+            GetApplicationEventTarget(),
+            0,
+            &mut hot_key_ref,
+        )
+    };
+    if result != 0 || hot_key_ref.is_null() {
+        return Err(HotkeyError::NativeRegister(format!(
+            "Carbon RegisterEventHotKey returned {result}"
+        )));
+    }
+    Ok(hot_key_ref)
+}
+
+#[cfg(target_os = "macos")]
+fn unregister_native_right_control(hot_key_ref: NativeEventHotKeyRef) -> Result<(), HotkeyError> {
+    let result = unsafe { UnregisterEventHotKey(hot_key_ref) };
+    if result != 0 {
+        return Err(HotkeyError::NativeUnregister(format!(
+            "Carbon UnregisterEventHotKey returned {result}"
+        )));
+    }
+    Ok(())
+}
+
 pub struct RegisteredShortcut {
     shortcut: Shortcut,
     hotkey: HotKey,
+    #[cfg(target_os = "macos")]
+    native_ref: Option<NativeEventHotKeyRef>,
 }
 pub trait HotkeyRegistrar {
     fn register_hotkey(&mut self, hotkey: HotKey) -> Result<(), global_hotkey::Error>;
@@ -619,8 +690,20 @@ impl RegisteredShortcut {
         manager: &GlobalHotKeyManager,
         shortcut: Shortcut,
     ) -> Result<Self, HotkeyError> {
+        #[cfg(target_os = "macos")]
+        if shortcut.key == KeyName::ControlRight {
+            let hotkey = shortcut.hotkey();
+            let native_ref = register_native_right_control(hotkey.id())?;
+            return Ok(Self {
+                shortcut,
+                hotkey,
+                native_ref: Some(native_ref),
+            });
+        }
+
         Self::register_with(&mut ManagerRef(manager), shortcut)
     }
+
     pub fn register_with<R: HotkeyRegistrar>(
         registrar: &mut R,
         shortcut: Shortcut,
@@ -629,18 +712,69 @@ impl RegisteredShortcut {
         registrar
             .register_hotkey(hotkey)
             .map_err(HotkeyError::Register)?;
-        Ok(Self { shortcut, hotkey })
+        Ok(Self {
+            shortcut,
+            hotkey,
+            #[cfg(target_os = "macos")]
+            native_ref: None,
+        })
     }
+
     pub fn new(manager: &GlobalHotKeyManager, shortcut: Shortcut) -> Result<Self, HotkeyError> {
         Self::register(manager, shortcut)
     }
+
     pub fn replace(
         &mut self,
         manager: &GlobalHotKeyManager,
         replacement: Shortcut,
     ) -> Result<(), HotkeyError> {
+        #[cfg(target_os = "macos")]
+        if self.shortcut.key == KeyName::ControlRight || replacement.key == KeyName::ControlRight {
+            return self.replace_with_native(manager, replacement);
+        }
         self.replace_with(&mut ManagerRef(manager), replacement)
     }
+
+    #[cfg(target_os = "macos")]
+    fn replace_with_native(
+        &mut self,
+        manager: &GlobalHotKeyManager,
+        replacement: Shortcut,
+    ) -> Result<(), HotkeyError> {
+        let next = replacement.hotkey();
+        let next_native = if replacement.key == KeyName::ControlRight {
+            Some(register_native_right_control(next.id())?)
+        } else {
+            manager.register(next).map_err(HotkeyError::Register)?;
+            None
+        };
+
+        let unregister_result = if self.shortcut.key == KeyName::ControlRight {
+            unregister_native_right_control(
+                self.native_ref
+                    .expect("standalone right Control shortcut has native registration"),
+            )
+        } else {
+            manager
+                .unregister(self.hotkey)
+                .map_err(HotkeyError::Unregister)
+        };
+        if let Err(error) = unregister_result {
+            if let Some(native_ref) = next_native {
+                let _ = unregister_native_right_control(native_ref);
+            } else {
+                let _ = manager.unregister(next);
+            }
+            return Err(error);
+        }
+
+        self.shortcut = replacement;
+        self.hotkey = next;
+        self.native_ref = next_native;
+        Ok(())
+    }
+
     pub fn replace_with<R: HotkeyRegistrar>(
         &mut self,
         registrar: &mut R,
@@ -656,16 +790,32 @@ impl RegisteredShortcut {
         }
         self.shortcut = replacement;
         self.hotkey = next;
+        #[cfg(target_os = "macos")]
+        {
+            self.native_ref = None;
+        }
         Ok(())
     }
+
     pub fn shortcut(&self) -> Shortcut {
         self.shortcut
     }
+
     pub fn id(&self) -> u32 {
         self.hotkey.id()
     }
+
     pub fn hotkey(&self) -> HotKey {
         self.hotkey
+    }
+}
+
+impl Drop for RegisteredShortcut {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(native_ref) = self.native_ref.take() {
+            let _ = unregister_native_right_control(native_ref);
+        }
     }
 }
 struct ManagerRef<'a>(&'a GlobalHotKeyManager);
@@ -744,10 +894,27 @@ impl ShortcutRecorder {
             self.candidate = None;
             return RecorderAction::Cancelled;
         }
+        if code == KeyCode::ControlRight {
+            return match state {
+                ElementState::Pressed => {
+                    self.candidate = Some((KeyName::ControlRight, Modifiers::default()));
+                    RecorderAction::Pending
+                }
+                ElementState::Released
+                    if self.candidate == Some((KeyName::ControlRight, Modifiers::default())) =>
+                {
+                    self.candidate = None;
+                    RecorderAction::Completed(Shortcut::new(
+                        KeyName::ControlRight,
+                        Modifiers::default(),
+                    ))
+                }
+                _ => RecorderAction::Ignored,
+            };
+        }
         if matches!(
             code,
             KeyCode::ControlLeft
-                | KeyCode::ControlRight
                 | KeyCode::AltLeft
                 | KeyCode::AltRight
                 | KeyCode::ShiftLeft
@@ -843,6 +1010,19 @@ mod tests {
                 KeyName::Space,
                 Modifiers::CONTROL | Modifiers::SHIFT
             ))
+        );
+    }
+
+    #[test]
+    fn recorder_accepts_standalone_right_control() {
+        let mut recorder = ShortcutRecorder::new();
+        assert_eq!(
+            recorder.handle_key(KeyCode::ControlRight, ElementState::Pressed),
+            RecorderAction::Pending
+        );
+        assert_eq!(
+            recorder.handle_key(KeyCode::ControlRight, ElementState::Released),
+            RecorderAction::Completed(Shortcut::new(KeyName::ControlRight, Modifiers::default()))
         );
     }
     #[test]

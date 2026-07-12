@@ -3,6 +3,6 @@
 mod parakeet;
 
 pub use parakeet::{
-    InstallError, PARAKEET_MANIFEST, ParakeetInstallState, ParakeetInstaller, ParakeetManifest,
-    create_parakeet_recognizer,
+    DownloadProgress, InstallError, PARAKEET_MANIFEST, ParakeetInstallState, ParakeetInstaller,
+    ParakeetManifest, create_parakeet_recognizer,
 };

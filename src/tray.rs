@@ -4,7 +4,7 @@ use tray_icon::{
 };
 
 use crate::app::OperationState;
-
+use crate::models::DownloadProgress;
 pub const ID_SHORTCUT: &str = "shortcut";
 pub const ID_ENGINE_APPLE: &str = "engine-apple";
 pub const ID_ENGINE_PARAKEET: &str = "engine-parakeet";
@@ -115,7 +115,7 @@ impl Tray {
             download,
             quit,
         };
-        tray.update(OperationState::Idle, None, parakeet_ready, false);
+        tray.update(OperationState::Idle, None, parakeet_ready, false, None);
         Ok(tray)
     }
 
@@ -125,17 +125,26 @@ impl Tray {
         error: Option<&str>,
         parakeet_ready: bool,
         has_shortcut: bool,
+        download_progress: Option<DownloadProgress>,
     ) {
+        let download_label = match download_progress {
+            Some(progress) if state == OperationState::Downloading => {
+                format!("Downloading model… {}%", progress.percent())
+            }
+            _ if state == OperationState::Downloading => "Downloading model…".to_string(),
+            _ => "Download model (460 MiB)".to_string(),
+        };
         let status = match (state, error) {
             (_, Some(error)) if !error.is_empty() => error.to_string(),
             (OperationState::Recording, _) => "Recording…".to_string(),
             (OperationState::Transcribing, _) => "Transcribing…".to_string(),
-            (OperationState::Downloading, _) => "Downloading model…".to_string(),
+            (OperationState::Downloading, _) => download_label.clone(),
             (OperationState::CapturingShortcut, _) => "Press a shortcut…".to_string(),
             (OperationState::Idle, _) if has_shortcut => "Ready".to_string(),
             _ => "Set a shortcut to start".to_string(),
         };
         self.status.set_text(status);
+        self.download.set_text(download_label);
         let idle = state == OperationState::Idle;
         self.shortcut.set_enabled(idle);
         self.download.set_enabled(idle && !parakeet_ready);

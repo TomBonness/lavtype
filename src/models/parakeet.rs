@@ -48,6 +48,29 @@ pub enum ParakeetInstallState {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadProgress {
+    pub downloaded: u64,
+    pub total: u64,
+}
+
+impl DownloadProgress {
+    pub const fn new(downloaded: u64, total: u64) -> Self {
+        Self { downloaded, total }
+    }
+
+    pub fn percent(self) -> u8 {
+        if self.total == 0 {
+            return 0;
+        }
+        self.downloaded
+            .saturating_mul(100)
+            .checked_div(self.total)
+            .unwrap_or(0)
+            .min(100) as u8
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
     #[error("Lavtype data directory is unavailable")]
@@ -127,8 +150,16 @@ impl ParakeetInstaller {
 
     /// Download and atomically install the pinned archive.
     pub fn download(&mut self) -> Result<(), InstallError> {
+        self.download_with_progress(|_, _| {})
+    }
+
+    /// Download while reporting copied and total bytes to the caller.
+    pub fn download_with_progress<F>(&mut self, mut progress: F) -> Result<(), InstallError>
+    where
+        F: FnMut(u64, u64),
+    {
         self.state = ParakeetInstallState::Downloading;
-        let result = self.download_inner();
+        let result = self.download_inner(&mut progress);
         if result.is_err() {
             let partial = self
                 .data_dir
@@ -165,7 +196,10 @@ impl ParakeetInstaller {
         result
     }
 
-    fn download_inner(&self) -> Result<(), InstallError> {
+    fn download_inner<F>(&self, progress: &mut F) -> Result<(), InstallError>
+    where
+        F: FnMut(u64, u64),
+    {
         let available = available_space(&self.data_dir)?;
         if available < REQUIRED_FREE_SPACE {
             return Err(InstallError::InsufficientSpace {
@@ -193,6 +227,7 @@ impl ParakeetInstaller {
                 actual: remote_length,
             });
         }
+        progress(0, remote_length);
         let mut response = response;
         let mut output = OpenOptions::new()
             .write(true)
@@ -209,6 +244,7 @@ impl ParakeetInstaller {
             output.write_all(&buffer[..read])?;
             hasher.update(&buffer[..read]);
             copied += read as u64;
+            progress(copied, remote_length);
         }
         output.flush()?;
         output.sync_all()?;
@@ -574,6 +610,15 @@ mod tests {
             MODEL_DIRECTORY_NAME,
             "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
         );
+    }
+
+    #[test]
+    fn download_progress_reports_bounded_percentages() {
+        assert_eq!(DownloadProgress::new(0, 100).percent(), 0);
+        assert_eq!(DownloadProgress::new(25, 100).percent(), 25);
+        assert_eq!(DownloadProgress::new(100, 100).percent(), 100);
+        assert_eq!(DownloadProgress::new(200, 100).percent(), 100);
+        assert_eq!(DownloadProgress::new(1, 0).percent(), 0);
     }
 
     #[test]
