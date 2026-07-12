@@ -36,7 +36,7 @@ objc2-av-foundation = "0.3.2"
 objc2-application-services = "0.3.2"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "block2"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSApplication", "NSRunningApplication", "block2"] }
 
 
 [profile.release]

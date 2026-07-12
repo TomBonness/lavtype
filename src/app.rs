@@ -292,6 +292,8 @@ impl Coordinator {
         crate::platform::require_x11_session()
             .map_err(|error| AppError::Message(error.to_owned()))?;
 
+        #[cfg(target_os = "macos")]
+        crate::platform::configure_menu_bar_only();
         use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
         use tao::{
             dpi::LogicalSize,
@@ -548,6 +550,17 @@ impl Coordinator {
                             }
                             let (microphone, speech, accessibility) =
                                 crate::platform::permission_summary();
+                            let needs_privacy_settings = !microphone.is_authorized()
+                                || (matches!(
+                                    settings.engine,
+                                    crate::settings::Engine::AppleSpeech
+                                ) && !speech.is_authorized())
+                                || !accessibility;
+                            if needs_privacy_settings
+                                && let Err(error) = crate::platform::open_privacy_settings()
+                            {
+                                last_error = Some(error.into());
+                            }
                             if !microphone.is_authorized() {
                                 last_error =
                                     Some("Microphone permission is required to record.".into());
