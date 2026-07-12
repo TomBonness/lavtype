@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lavtype
+GenericName=Push-to-talk transcription
+Comment=Hold a shortcut to transcribe speech into the focused application
+Exec=lavtype
+Icon=lavtype
+Terminal=false
+Categories=Utility;AudioVideo;
+Keywords=dictation;transcription;speech;
+StartupNotify=false

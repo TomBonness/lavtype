@@ -1,0 +1,47 @@
+[package]
+name = "lavtype"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92.0"
+license = "MIT"
+description = "Bare-bones push-to-talk transcription for macOS and Linux"
+repository = "https://github.com/lavtype/lavtype"
+
+[dependencies]
+tao = "0.35.3"
+tray-icon = { version = "0.24.1", default-features = false, features = ["gtk"] }
+global-hotkey = "0.8.0"
+cpal = "0.18.1"
+rubato = "4.0.0"
+audioadapter-buffers = "4.0.0"
+enigo = { version = "0.6.1", default-features = false, features = ["x11rb"] }
+sherpa-onnx = "1.13.4"
+directories = "6.0.0"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9"
+thiserror = "2.0"
+crossbeam-channel = "0.5"
+tempfile = "3.27"
+hound = "3.5.1"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "system-proxy"] }
+sha2 = "0.11.0"
+tar = "0.4.46"
+bzip2 = "0.6.1"
+fs2 = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-speech = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-av-foundation = "0.3.2"
+objc2-application-services = "0.3.2"
+objc2 = "0.6"
+block2 = "0.6"
+
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[[bin]]
+name = "lavtype"
+path = "src/main.rs"

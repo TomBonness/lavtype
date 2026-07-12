@@ -1,0 +1,30 @@
+# cargo-packager 0.11.8 configuration. The release workflow selects the format and target.
+name = "lavtype"
+product-name = "Lavtype"
+version = "0.1.0"
+identifier = "io.github.lavtype.lavtype"
+description = "Bare-bones push-to-talk transcription for macOS and Linux"
+long-description = "A tray-only dictation utility with one configurable press-and-hold shortcut, local Parakeet recognition, and on-device Apple Speech on macOS."
+homepage = "https://github.com/lavtype/lavtype"
+license-file = "LICENSE"
+copyright = "Copyright (c) 2026 Lavtype contributors"
+out-dir = "dist"
+icons = ["assets/icons/lavtype.png", "assets/icons/lavtype.icns"]
+[[binaries]]
+path = "lavtype"
+main = true
+
+
+[macos]
+background-app = true
+minimum-system-version = "13.0"
+info-plist-path = "packaging/macos/Info.plist"
+entitlements = "packaging/macos/entitlements.plist"
+
+[linux]
+generate-desktop-entry = true
+
+[appimage]
+# The GTK plugin is pinned to a commit rather than a moving branch.
+linuxdeploy-plugins = { gtk = "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/7a3fbc31a9e5075073ff8790f26effbac5f84453/linuxdeploy-plugin-gtk.sh" }
+files = { "packaging/linux/lavtype.desktop" = "usr/share/applications/lavtype.desktop" }

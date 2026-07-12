@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            cmake pkg-config libgtk-3-dev libayatana-appindicator3-dev \
+            libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libfuse2
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.92.0
+          components: rustfmt, clippy
+      - name: Prefetch sherpa-onnx native runtime
+        run: |
+          set -euo pipefail
+          mkdir -p .cache/sherpa-onnx
+          archive=sherpa-onnx-v1.13.4-linux-x64-static-lib.tar.bz2
+          curl --fail --location --retry 3 \
+            --output ".cache/sherpa-onnx/$archive" \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/$archive"
+          printf '%s  %s\n' \
+            '98b0e31996426f6e78244dbce1955548f2c64e8f01c4be75b85af7cdaa2e8d5c' \
+            ".cache/sherpa-onnx/$archive" | sha256sum -c -
+          echo "SHERPA_ONNX_ARCHIVE_DIR=$PWD/.cache/sherpa-onnx" >> "$GITHUB_ENV"
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked --all-targets
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-14
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.92.0
+          target: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - name: Prefetch sherpa-onnx native runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .cache/sherpa-onnx
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            archive=sherpa-onnx-v1.13.4-osx-arm64-static-lib.tar.bz2
+            digest=57801db2bbb786a5d343f515a38ff210b401842338bdc804fa075312d1cd2404
+          else
+            archive=sherpa-onnx-v1.13.4-osx-x64-static-lib.tar.bz2
+            digest=2bda2c10b31a1cfc45d9f9e14bd4983743ec3779d309e42d99a6c8fa1689043f
+          fi
+          curl --fail --location --retry 3 \
+            --output ".cache/sherpa-onnx/$archive" \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/$archive"
+          printf '%s  %s\n' "$digest" ".cache/sherpa-onnx/$archive" | shasum -a 256 -c -
+          echo "SHERPA_ONNX_ARCHIVE_DIR=$PWD/.cache/sherpa-onnx" >> "$GITHUB_ENV"
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
+      - name: Tests
+        run: cargo test --locked --all-targets --target ${{ matrix.target }}
